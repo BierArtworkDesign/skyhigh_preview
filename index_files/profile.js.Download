@@ -1,0 +1,729 @@
+//<script>
+
+/* returns a jquery deferred object, .done() means an invite was sent (or attempted), .fail() indicates they dismissed the modal */
+function PresentGroupInviteOptions( rgFriendsToInvite )
+{
+	// this deferred will succeed if an invite is succesfully sent, fail if the user dismisses the modal or the invite AJAX fails
+	var deferred = new jQuery.Deferred();
+
+	var Modal = ShowDialog( 'In Ihre Gruppe einladen', '<div class="group_invite_throbber"><img src="https://steamcommunity-a.akamaihd.net/public/images/login/throbber.gif"></div>' );
+	var $ListElement = $J('<div/>', {'class': 'newmodal_content_innerbg'} );
+
+	var bBulkFriendInvite = false;
+	var steamIDInvitee = g_rgProfileData['steamid'];
+	var strProfileURL = g_rgProfileData['url'];
+
+	// see if this is a request to bulk invite a group of friends
+	if ( rgFriendsToInvite && rgFriendsToInvite instanceof Array )
+	{
+		if ( rgFriendsToInvite.length == 1 )
+		{
+			steamIDInvitee = rgFriendsToInvite[0];
+			strProfileURL = 'https://steamcommunity.com/profiles/' + steamIDInvitee + '/';
+		}
+		else
+		{
+			// true bulk invite
+			steamIDInvitee = rgFriendsToInvite;
+			bBulkFriendInvite = true;
+		}
+	}
+
+	// if the modal is dismissed , we'll cancel the deferred object.  We capture this in a closure so that we can dismiss the modal without affecting
+	//	the deferred object if the user actually picks something (in which case the deferred object will be the success of the AJAX invite action)
+	var fnOnModalDismiss = function() { deferred.reject() };
+
+	$J.get( strProfileURL + 'ajaxgroupinvite?new_profile=1' + ( bBulkFriendInvite ? '&bulk=1' : '' ), function( html ) {
+		Modal.GetContent().find( '.newmodal_content').html('');	// erase the throbber
+		Modal.GetContent().find( '.newmodal_content').append( $ListElement );
+		$ListElement.html( html );
+		Modal.AdjustSizing();
+		$ListElement.children( '.group_list_results' ).children().each( function () {
+			var groupid = this.getAttribute( 'data-groupid' );
+			if ( groupid )
+			{
+				$J(this).click( function() {
+					fnOnModalDismiss = function () {;};	// don't resolve the deferred on modal dismiss anymore, user has picked something
+					InviteUserToGroup( Modal, groupid, steamIDInvitee)
+					.done( function() { deferred.resolve(); } )
+					.fail( function() { deferred.reject(); } );
+				} );
+			}
+		});
+	});
+
+	Modal.done( function() {fnOnModalDismiss();} );
+
+	return deferred.promise();
+}
+
+function InviteUserToGroup( Modal, groupID, steamIDInvitee )
+{
+	var params = {
+		json: 1,
+		type: 'groupInvite',
+		group: groupID,
+		sessionID: g_sessionID
+	};
+
+	if ( !steamIDInvitee.length )
+	{
+		ShowAlertDialog( 'Fehler', 'Sie haben keine Freunde ausgewählt.' );
+		return;
+	}
+
+	if ( steamIDInvitee instanceof Array )
+		params.invitee_list = V_ToJSON( steamIDInvitee );
+	else
+		params.invitee = steamIDInvitee;
+
+	return $J.ajax( { url: 'https://steamcommunity.com/actions/GroupInvite',
+		data: params,
+		type: 'POST'
+	} ).done( function( data ) {
+		Modal && Modal.Dismiss();
+
+		var strMessage = 'Einladung verschickt!';
+		if ( steamIDInvitee instanceof Array && steamIDInvitee.length > 1 )
+			strMessage = 'Einladungen verschickt!';
+
+		ShowAlertDialog( 'In Ihre Gruppe einladen', strMessage );
+	}).fail( function( data ) {
+		Modal && Modal.Dismiss();
+
+		var rgResults = data.responseJSON;
+
+		var strModalTitle = 'Gruppeneinladung fehlgeschlagen';
+        var strAccountListModal = '<div class="ctnClanInviteErrors">';
+        strAccountListModal += rgResults.results ? rgResults.results : 'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.';
+		if ( rgResults.rgAccounts )
+		{
+			strAccountListModal += '<div class="ctnClanInviteErrors"><table class="clanInviteErrorTable" ><thead><tr><th class="inviteTablePersona" >Eingeladener Spieler</th><th class="inviteTableError">Fehler</th></tr></thead><tbody>';
+			var cAccounts = 0;
+			$J.each( rgResults.rgAccounts, function( accountid, rgError ){
+				strAccountListModal += '<tr>';
+				strAccountListModal += '<td class="inviteTablePersona ellipsis">' + rgError.persona + '</td>';
+				strAccountListModal += '<td class="inviteTableError">' + rgError.strError + "</td>";
+				strAccountListModal += '</tr>';
+
+                if ( typeof SelectNone != 'undefined' )
+                {
+	                SelectNone();
+	                $J( '#fr_' + accountid ).addClass( 'groupInviteFailed' );
+                }
+
+				cAccounts++;
+			} );
+			strAccountListModal += '</tbody></table>';
+
+            if ( cAccounts > 1 )
+	            strModalTitle = 'Gruppeneinladungen fehlgeschlagen';
+
+		}
+		strAccountListModal +='</div>';
+		ShowAlertDialog( strModalTitle, strAccountListModal );
+	});
+}
+
+function RemoveFriend()
+{
+	var steamid = g_rgProfileData['steamid'];
+	var strPersonaName = g_rgProfileData['personaname'];
+
+	ShowConfirmDialog( 'Freund entfernen',
+		'Sind Sie sicher, dass Sie %s aus Ihrer Freundesliste entfernen möchten?'.replace( /%s/, strPersonaName ),
+		'Freund entfernen'
+	).done( function() {
+		$J.post(
+			'https://steamcommunity.com/actions/RemoveFriendAjax',
+			{sessionID: g_sessionID, steamid: steamid }
+		).done( function() {
+			ShowAlertDialog( 'Freund entfernen',
+				'%s wurde von Ihrer Freundesliste entfernt.'.replace( /%s/, strPersonaName )
+			).done( function() {
+				// reload the page when they click OK, so we update friend state
+				window.location.reload();
+			} );
+		} ).fail( function() {
+			ShowAlertDialog( 'Freund entfernen',
+				'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.'
+			);
+		} );
+	} );
+}
+
+function CancelInvite()
+{
+	var steamid = g_rgProfileData['steamid'];
+	var strPersonaName = g_rgProfileData['personaname'];
+
+	ShowConfirmDialog( 'Anfrage zurückziehen',
+	'Sind Sie sicher, dass die diese Freundschaftsanfrage zurückziehen möchten?<br>Sie werden diesem Spieler nicht sofort eine neue Anfrage senden können. Wenn Sie ihn persönlich kennen, können Sie ihm aber jederzeit einen <a href="https://steamcommunity.com/my/friends/add" target="_blank" rel="noreferrer">Freundschaftsanfragelink</a> schicken.',
+	'Anfrage zurückziehen'
+	).done( function() {
+		$J.post(
+			'https://steamcommunity.com/actions/RemoveFriendAjax',
+			{sessionID: g_sessionID, steamid: steamid }
+		).done( function() {
+			ShowAlertDialog( 'Anfrage zurückziehen',
+				'Ihre Anfrage an %s wurde zurückgezogen.'.replace( /%s/, strPersonaName )
+		).done( function() {
+				// reload the page when they click OK, so we update friend state
+				window.location.reload();
+			} );
+		} ).fail( function() {
+			ShowAlertDialog( 'Anfrage zurückziehen',
+				'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.'
+		);
+		} );
+	} );
+}
+
+// also used for accepting friend invites
+function AddFriend( bRespondingToInvite, steamid_friend, strPersonaName_friend )
+{
+	var steamid = steamid_friend ? steamid_friend : g_rgProfileData['steamid'];
+	var strPersonaName = strPersonaName_friend ? strPersonaName_friend : g_rgProfileData['personaname'];
+
+	$J.post(
+		'https://steamcommunity.com/actions/AddFriendAjax',
+		{sessionID: g_sessionID, steamid: steamid, accept_invite: bRespondingToInvite ? 1 : 0 }
+	).done( function() {
+		if ( !bRespondingToInvite )
+		{
+			ShowAlertDialog( 'Freund hinzufügen' + ' - ' + strPersonaName,
+				'Freundschaftsanfrage gesendet. Dieser Nutzer wird Ihnen als Freund angezeigt, sobald Ihre Anfrage angenommen wurde.'
+			).done( function() { window.location.reload(); } );
+		}
+		else
+		{
+			ShowAlertDialog( 'Anfrage annehmen',
+				'Freundschaftsanfrage akzeptiert'
+			).done( function() { window.location.reload(); } );
+		}
+	} ).fail( function( jqXHR  ) {
+
+		var failedInvites = jqXHR.responseJSON['failed_invites_result'];
+
+		if ( failedInvites === undefined )
+		{
+			ShowAlertDialog( 'Freund hinzufügen',
+				'Fehler beim Hinzufügen des Freundes. Bitte versuchen Sie es erneut.'
+			);
+			return;
+		}
+
+		// defaults
+		var strTitle = 'Freund hinzufügen';
+		var strMessage = 'Fehler beim Hinzufügen des Freundes. Bitte versuchen Sie es erneut.';
+
+		switch ( failedInvites[0] )
+		{
+			case 25:
+				strMessage = 'Anfrage an %s kann nicht gesendet werden. Ihre Freundesliste ist voll.';
+				break;
+
+			case 15:
+				strMessage = 'Anfrage an %s kann nicht gesendet werden. Seine/Ihre Freundesliste ist voll.';
+				break;
+
+			case 40:
+				strMessage = 'Fehler beim Hinzufügen des Freundes. Die Kommunikation zwischen Ihnen und dem anderen Steam-Mitglied ist blockiert.';
+				break;
+
+			case 11:
+				strMessage = 'Sie blockieren jegliche Kommunikation mit diesem Benutzer. Die Kommunikation ist erst möglich, wenn Sie die Blockierung aufgehoben haben. Besuchen Sie hierfür die Steam-Communityseite des Benutzers.';
+				break;
+
+			case 84:
+				strMessage = 'Wie es aussieht, haben Sie in letzter Zeit zu viele Freundschaftsanfragen versendet. Um Spam zu vermeiden, müssen Sie eine Zeit lang warten, bevor Sie weitere Freunde hinzufügen können. Bitte beachten Sie, dass andere Spieler Sie während dieser Zeit immer noch hinzufügen können.';
+				break;
+
+			case 24:
+				strMessage = 'Ihr Account erfüllt nicht die Voraussetzungen, um diese Funktion zu nutzen. <a class="whiteLink" href="https://help.steampowered.com/de/wizard/HelpWithLimitedAccount" target="_blank" rel="noreferrer">Besuchen Sie den Steam-Support</a>, um weitere Informationen zu erhalten.';
+				break;
+
+			default:
+				// default text is above
+				break;
+		}
+
+		strMessage = strMessage.replace( /%s/, strPersonaName );
+		ShowAlertDialog( strTitle, strMessage );
+
+	} );
+}
+
+// ignore an invite; do not block the inviter
+function IgnoreFriendInvite( steamid_friend, strPersonaName_friend )
+{
+	var steamid = steamid_friend ? steamid_friend : g_rgProfileData['steamid'];
+	var strPersonaName = strPersonaName_friend ? strPersonaName_friend : g_rgProfileData['personaname'];
+
+	$J.post(
+		'https://steamcommunity.com/actions/IgnoreFriendInviteAjax',
+		{sessionID: g_sessionID, steamid: steamid }
+	).done( function() {
+		ShowAlertDialog( 'Freundschaftsanfrage ignorieren',
+			'Freundschaftsanfrage ignoriert'
+		).done( function() { window.location.reload(); } );
+	} ).fail( function() {
+		ShowAlertDialog( 'Freundschaftsanfrage ignorieren',
+			'Fehler beim Ignorieren der Freundschaftsanfrage. Bitte versuchen Sie es erneut.'
+		);
+	} );
+}
+
+// block a user, with confirmation
+function ConfirmBlock()
+{
+	var steamid = g_rgProfileData['steamid'];
+	var strPersonaName = g_rgProfileData['personaname'];
+
+	ShowConfirmDialog( 'Jegliche Kommunikation blocken',
+		'Sie unterbinden hiermit jegliche Kommunikation mit %s.'.replace( /%s/, strPersonaName ),
+		'Ja, bitte blockieren'
+	).done( function() {
+			$J.post(
+				'https://steamcommunity.com/actions/BlockUserAjax',
+				{sessionID: g_sessionID, steamid: steamid, block: 1 }
+			).done( function() {
+				ShowAlertDialog( 'Jegliche Kommunikation blocken',
+					'Sie haben jegliche Kommunikation mit diesem Spieler blockiert.'
+				).done( function() {
+					location.reload();
+				} );
+			} ).fail( function() {
+				ShowAlertDialog( 'Jegliche Kommunikation blocken',
+					'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.'
+				);
+			} );
+		} );
+}
+
+// unblock a user, with confirmation
+function ConfirmUnblock()
+{
+	var steamid = g_rgProfileData['steamid'];
+	var strPersonaName = g_rgProfileData['personaname'];
+
+	ShowConfirmDialog( 'Sämtliche Kommunikation wieder zulassen',
+	'Sie lassen hiermit jegliche Kommunikation mit %s wieder zu.'.replace( /%s/, strPersonaName ),
+	'Ja, Kommunikation wieder zulassen'
+).done( function() {
+	$J.post(
+		'https://steamcommunity.com/actions/BlockUserAjax',
+		{sessionID: g_sessionID, steamid: steamid, block: 0 }
+	).done( function() {
+		ShowAlertDialog( 'Sämtliche Kommunikation wieder zulassen',
+			'Sie lassen jegliche Kommunikation mit diesem Spieler wieder zu.'
+		).done( function() {
+			location.reload();
+		} );
+	} ).fail( function() {
+		ShowAlertDialog( 'Sämtliche Kommunikation wieder zulassen',
+			'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.'
+		);
+	} );
+} );
+}
+
+function InitProfileSummary( strSummary )
+{
+	var $Summary = $J( '.profile_summary' );
+	var $SummaryFooter = $J( '.profile_summary_footer' );
+
+	if ( $Summary[0].scrollHeight <= 76 )
+	{
+		$Summary.addClass( 'noexpand' );
+		$SummaryFooter.hide();
+	}
+	else
+	{
+		var $ModalSummary = $J('<div/>', {'class': 'profile_summary_modal'}).html( strSummary );
+		$SummaryFooter.find( 'span' ).click( function() {
+			var Modal = ShowDialog( 'Informationen', $ModalSummary );
+			window.setTimeout( function() { Modal.AdjustSizing(); }, 1 );
+		} );
+	}
+
+}
+
+function ShowFriendsInCommon( unAccountIDTarget )
+{
+	ShowPlayerList( 'Gemeinsame Freunde', 'friendsincommon', unAccountIDTarget );
+}
+
+function ShowFriendsInGroup( unClanIDTarget )
+{
+	ShowPlayerList( 'Freunde in Gruppe', 'friendsingroup', unClanIDTarget );
+}
+
+function ShowPlayerList( title, type, unAccountIDTarget, rgAccountIDs )
+{
+	var Modal = ShowAlertDialog( title, '<div class="group_invite_throbber"><img src="https://steamcommunity-a.akamaihd.net/public/images/login/throbber.gif"></div>' );
+	var $ListElement = $J('<div/>', {'class': 'player_list_ctn'} );
+	var $Buttons = Modal.GetContent().find('.newmodal_buttons').detach();
+
+	Modal.GetContent().css( 'min-width', 268 );
+
+	var rgParams = {};
+	if ( type )
+		rgParams['type'] = type;
+	if ( unAccountIDTarget )
+		rgParams['target'] = unAccountIDTarget;
+	if ( rgAccountIDs )
+		rgParams['accountids'] = rgAccountIDs.join( ',' );
+
+	$J.get( 'https://steamcommunity.com/actions/PlayerList/', rgParams, function( html ) {
+
+		$ListElement.html( html );
+
+		var $Content = Modal.GetContent().find( '.newmodal_content');
+		$Content.html(''); // erase the throbber
+		$Content.append( $ListElement );
+		$Content.append( $Buttons );
+
+		Modal.AdjustSizing();
+		$ListElement.append();
+	});
+}
+
+function ToggleManageFriends()
+{
+	if ( $J('#manage_friends_actions_ctn').is( ':hidden' ) )
+	{
+		$J('#manage_friends_btn').find( '.btn_details_arrow').removeClass( 'down').addClass( 'up' );
+		$J('#manage_friends_actions_ctn').slideDown( 'fast' );
+		$J('div.manage_friend_checkbox').show();
+		$J('a.friendBlockLinkOverlay' ).on( 'click.manage_friends', function( event ) {
+			if ( !event.which || event.which == 1 )
+			{
+				event.preventDefault();
+				$J(this ).siblings('.manage_friend_checkbox' ).find('input[type=checkbox]' ).prop( 'checked', function( i, v ) { return !v; } );
+			}
+		});
+	}
+	else
+	{
+		$J('#manage_friends_btn').find( '.btn_details_arrow').removeClass( 'up').addClass( 'down' );
+		$J('#manage_friends_actions_ctn').slideUp( 'fast' );
+		$J('div.manage_friend_checkbox').hide();
+		$J('a.friendBlockLinkOverlay' ).off( 'click.manage_friends' );
+	}
+}
+
+function ManageFriendsInviteToGroup( $Form, groupid )
+{
+	$Form.find('input[type="checkbox"]');
+	var rgFriendSteamIDs = [];
+	$Form.find( 'input[type=checkbox]' ).each( function() {
+		if ( this.checked )
+			rgFriendSteamIDs.push( $J(this).attr( 'data-steamid' ) );
+	} );
+	if ( rgFriendSteamIDs.length > 0 )
+	{
+		if ( groupid )
+		{
+			// specific group
+			InviteUserToGroup( null /* no modal window */, groupid, rgFriendSteamIDs ).done( function() {
+				$Form.find('input[type=checkbox]').prop( 'checked', false );
+			});
+		}
+		else
+		{
+			// ask the user which group to invite to
+			PresentGroupInviteOptions( rgFriendSteamIDs).done( function() {
+				$Form.find('input[type=checkbox]').prop( 'checked', false );
+			});
+		}
+	}
+	else
+	{
+		ShowAlertDialog( 'In Ihre Gruppe einladen', 'Sie haben keine Freunde ausgewählt.' );
+	}
+}
+
+function ManageFriendsExecuteBulkAction( $Form, strActionName )
+{
+	if ( $Form.find('input[type=checkbox]:checked').length == 0 )
+	{
+		ShowAlertDialog( '', 'Sie haben keine Freunde ausgewählt.' );
+		return;
+	}
+
+	$Form.find('input[name=action]').val( strActionName );
+	$Form.submit();
+}
+
+function ManageFriendsConfirmBulkAction( $Form, strActionName, strTitle, strSingluarDescription, strPluralDescription )
+{
+	var cFriendsSelected = $Form.find('input[type=checkbox]:checked').length;
+	if ( cFriendsSelected == 0 )
+	{
+		ShowAlertDialog( strTitle, 'Sie haben keine Freunde ausgewählt.' );
+		return;
+	}
+
+	var strDescription = strSingluarDescription;
+	if ( cFriendsSelected != 1 )
+		strDescription = strPluralDescription.replace( /%s/, cFriendsSelected );
+
+	ShowConfirmDialog( strTitle, strDescription).done( function() {
+		ManageFriendsExecuteBulkAction( $Form, strActionName );
+	});
+}
+
+function ManageFriendsBlock( $Form )
+{
+	ManageFriendsConfirmBulkAction( $Form, 'ignore', 'Blockieren',
+		'Sind Sie sicher, dass Sie diesen Freund blockieren möchten?' + ' ' + 'Sie werden keine Nachrichten oder Einladungen von diesem Spieler mehr erhalten oder an diesen versenden können.',
+		'Sind Sie sicher, dass Sie diese %s Freunde blockieren möchten?' + ' ' + 'Sie werden keine Nachrichten oder Einladungen von diesen Spielern mehr erhalten oder an diese versenden können.');
+}
+
+function ManageFriendsRemove( $Form )
+{
+	ManageFriendsConfirmBulkAction( $Form, 'remove', 'Freund entfernen',
+		'Sind Sie sicher, dass Sie diesen Freund entfernen möchten?' + ' ' + 'Dieser Spieler wird nicht mehr in Ihrer Freundesliste angezeigt und Sie können nicht mehr mit ihm kommunizieren.',
+		'Sind Sie sicher, dass Sie diese %s Freunde entfernen möchten?' + ' ' + 'Diese Spieler werden nicht mehr in Ihrer Freundesliste angezeigt und Sie können nicht mehr mit ihnen kommunizieren.');
+}
+
+function ManageFollowingRemove( $Form )
+{
+	ManageFriendsConfirmBulkAction( $Form, 'removefollowing', 'Von Ihrer "Gefolgt"-Liste entfernen?',
+		'Sind Sie sicher, dass Sie dieser Person nicht mehr folgen möchten?',
+		'Sind Sie sicher, dass Sie %s Personen nicht mehr folgen möchten?');
+}
+
+function ManageFriendsAddFriends( $Form )
+{
+	ManageFriendsConfirmBulkAction( $Form, 'addfriend', 'Zur Freundesliste hinzufügen',
+		'Sind Sie sicher, dass Sie den ausgewählten Spielern eine Freundschaftsanfrage senden möchten? ',
+		'Sind Sie sicher, dass Sie den ausgewählten Spielern eine Freundschaftsanfrage senden möchten? '	);
+}
+
+
+
+var AliasesLoaded = false;
+function ShowAliasPopup(e)
+{
+	ShowMenu( e, 'NamePopup', 'left' );
+
+	if( AliasesLoaded )
+		return true;
+
+	var aliasContainer = $( 'NamePopupAliases' );
+
+	var throbber = document.createElement( 'img' );
+	throbber.src = 'https://steamcommunity-a.akamaihd.net/public/images/login/throbber.gif';
+	aliasContainer.appendChild( throbber );
+
+	new Ajax.Request( g_rgProfileData['url'] + 'ajaxaliases/', {
+		method: 'post',
+		parameters: { },
+		onSuccess: function( transport ) {
+
+			var Aliases = transport.responseJSON;
+
+			if( !aliasContainer )
+				return;
+
+			aliasContainer.update('');
+
+			if( !Aliases || Aliases.length == 0 )
+				Aliases.push( {newname: "Dieser Nutzer hat keine bekannten Pseudonyme"} );
+			else
+				$( 'NamePopupClearAliases' ).show();
+
+			for( var x=0; x<Aliases.length; x++ )
+			{
+				var c = Aliases[x];
+
+				var curSpan = document.createElement( 'p' );
+				var curATN = document.createTextNode( c['newname'] );
+				curSpan.appendChild( curATN );
+				aliasContainer.appendChild( curSpan );
+			}
+
+			AliasesLoaded = true;
+		},
+		onFailure: function( transport ) { alert( 'Please try again later' ); }
+	} );
+}
+
+function ShowClearAliasDialog()
+{
+	ShowConfirmDialog( 'Vorherige Aliase löschen', 'Sind Sie sicher, dass Sie Ihren Namensverlauf löschen möchten? Dies erschwert es anderen Nutzern, mit denen Sie zuvor gespielt haben, Sie zu finden und möglicherweise auch Nutzern Ihrer Freundesliste, Sie zu erkennen.' )
+		.done( function() {
+			$J.ajax( {
+				url: g_rgProfileData['url'] + 'ajaxclearaliashistory/',
+				data: { sessionid: g_sessionID },
+				type: 'POST',
+				dataType: 'json'
+			}).done( function( data ) {
+				if ( data.success != 1 )
+				{
+					ShowAlertDialog( '', 'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.' );
+				}
+				else
+				{
+					location.reload();
+				}
+			}).fail( function( data ) {
+				ShowAlertDialog( '', 'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.' );
+			})
+		} );
+}
+
+function IsValidNickname( str )
+{
+	return str.length == 0 || str.strip().length > 2;
+}
+
+function ShowNicknameModal( )
+{
+	// Show the dialogue
+	ShowPromptDialog( "Nickname hinzuf\u00fcgen", "Geben Sie diesem Spieler einen dauerhaften Spitznamen, um stets zu wissen, um wen es sich handelt.", "Nickname hinzuf\u00fcgen", "Abbrechen" )
+		.done( function( nickname, other ) {
+			// User clicked 'OK', so we have a value; need to send it to the server
+			$J.ajax( { url: g_rgProfileData['url'] + "ajaxsetnickname/",
+				data: { nickname: nickname, sessionid: g_sessionID },
+				type: 'POST',
+				dataType: 'json'
+			} ).done( function( data ) {
+				// Got request result back, show it on the page
+				if(data.nickname != undefined && data.nickname.length > 0)
+				{
+					$target = $J('.persona_name .nickname');
+					// Add the nickname element if we don't already have one.
+					if( $target.length == 0 )
+						$target = $J('<span class="nickname"></span>').insertBefore( '.namehistory_link' );
+
+					$target.text( "(" + data.nickname + ") " );
+					$target.show();
+				} else
+					$J('.persona_name .nickname').hide();
+
+			}).fail( function( data ) {
+				ShowAlertDialog( '', data.results ? data.results : 'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.' );
+			});
+
+		}
+	);
+}
+
+function SetFollowing( bFollowing, fnOnSuccess )
+{
+	var url = bFollowing ? g_rgProfileData['url'] + "followuser/" : g_rgProfileData['url'] + "unfollowuser/";
+	$J.ajax( { url: url,
+		data: { sessionid: g_sessionID },
+		type: 'POST',
+		dataType: 'json'
+	} ).done( function( data ) {
+		fnOnSuccess( bFollowing );
+	}).fail( function( data ) {
+		ShowAlertDialog( '', data.results ? data.results : 'Bei der Verarbeitung Ihrer Anfrage ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut.' );
+	});
+}
+
+
+function ShowFriendSelect( title, fnOnSelect )
+{
+	var Modal = ShowAlertDialog( title, '<div class="group_invite_throbber"><img src="https://steamcommunity-a.akamaihd.net/public/images/login/throbber.gif"></div>', 'Abbrechen' );
+	var $ListElement = $J('<div/>', {'class': 'player_list_ctn'} );
+	var $Buttons = Modal.GetContent().find('.newmodal_buttons').detach();
+
+	Modal.GetContent().css( 'min-width', 268 );
+
+	var rgParams = {type: 'friends'};
+
+	$J.get( 'https://steamcommunity.com/actions/PlayerList/', rgParams, function( html ) {
+
+		$ListElement.html( html );
+
+		$ListElement.find( 'a' ).remove();
+		$ListElement.find( '[data-miniprofile]').each( function() {
+			var $El = $J(this);
+			$El.click( function() {  Modal.Dismiss(); fnOnSelect( $El.data('miniprofile') ); } );
+		} );
+
+		var $Content = Modal.GetContent().find( '.newmodal_content');
+		$Content.html(''); // erase the throbber
+		$Content.append( $ListElement );
+		$Content.append( $Buttons );
+
+		Modal.AdjustSizing();
+	});
+}
+
+function StartTradeOffer( unAccountID, rgParams )
+{
+	var params = rgParams || {};
+	params['partner'] = unAccountID;
+	ShowTradeOffer( 'new', params );
+}
+
+function CancelTradeOffer( tradeOfferID )
+{
+	ShowConfirmDialog(
+		'Handelsangebot zurückziehen',
+		'Sind Sie sicher, dass Sie dieses Handelsangebot zurückziehen möchten?',
+		'Ja',
+		'Nein'
+	).done( function() {
+		ActOnTradeOffer( tradeOfferID, 'cancel', 'Handelsangebot zurückgezogen', 'Handelsangebot zurückziehen' );
+	} );
+}
+
+function DeclineTradeOffer( tradeOfferID )
+{
+	ShowConfirmDialog(
+		'Handel ablehnen',
+		'Sind Sie sicher, dass Sie dieses Handelsangebot ablehnen möchten? Sie können auch einige Artikel ändern und ein Gegenangebot senden.',
+		'Handel ablehnen',
+		null,
+		'Gegenangebot machen'
+	).done( function( strButton ) {
+		if ( strButton == 'OK' )
+			ActOnTradeOffer( tradeOfferID, 'decline', 'Handel abgelehnt', 'Handel ablehnen' );
+		else
+			ShowTradeOffer( tradeOfferID, {counteroffer: 1} );
+	} );
+}
+
+function ActOnTradeOffer( tradeOfferID, strAction, strCompletedBanner, strActionDisplayName )
+{
+	var $TradeOffer = $J('#tradeofferid_' + tradeOfferID);
+	$TradeOffer.find( '.tradeoffer_footer_actions').hide();
+
+	return $J.ajax( {
+		url: 'https://steamcommunity.com/tradeoffer/' + tradeOfferID + '/' + strAction,
+		data: { sessionid: g_sessionID },
+		type: 'POST',
+		crossDomain: true,
+		xhrFields: { withCredentials: true }
+	}).done( function( data ) {
+		AddTradeOfferBanner( tradeOfferID, strCompletedBanner, false );
+
+		RefreshNotificationArea();
+	}).fail( function() {
+		ShowAlertDialog( strActionDisplayName, 'Beim Verändern dieses Handelsangebots ist ein Fehler aufgetreten. Bitte versuchen Sie es später erneut.' );
+		$TradeOffer.find( '.tradeoffer_footer_actions').show();
+	});
+}
+
+function AddTradeOfferBanner( tradeOfferID, strCompletedBanner, bAccepted )
+{
+	var $TradeOffer = $J('#tradeofferid_' + tradeOfferID);
+	$TradeOffer.find( '.tradeoffer_footer_actions').hide();
+	$TradeOffer.find( '.link_overlay' ).hide();
+	$TradeOffer.find( '.tradeoffer_items_ctn').removeClass( 'active' ).addClass( 'inactive' );
+
+	var $Banner = $J('<div/>', {'class': 'tradeoffer_items_banner' } );
+	if ( bAccepted )
+		$Banner.addClass( 'accepted' );
+
+	$Banner.text( strCompletedBanner );
+	$TradeOffer.find( '.tradeoffer_items_rule').replaceWith( $Banner );
+}
+
